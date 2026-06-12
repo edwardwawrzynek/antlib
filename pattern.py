@@ -11,7 +11,7 @@ from antlib.constants import ETA0
 # Pattern represents a radiation pattern, sampled on a sphere
 class Pattern:
     # Construct a radiation pattern from sampled points gridded in theta-phi
-    # Eth and Eph are ndarray's of complex electric field intensity values (in V), indexed as [freq, theta, phi]
+    # Eth and Eph are ndarray's of peak (NOT rms) complex electric field intensity values (in V), indexed as [freq, theta, phi]
     # freq is a list of the frequencies of measurement in Hz
     # theta and phi are the angles in radians of measured points
     # rad_eff is radiation efficiency, used for calculating gain
@@ -34,6 +34,13 @@ class Pattern:
 
         self.rad_eff = xr.DataArray(rad_eff, dims=("freq"), coords={"freq": freq})
 
+    # Round frequency to the nearest Hz
+    # This might be needed to match sparameters, which are often rounded to nearest Hz
+    def round_freq_to_Hz(self):
+        self.Eth.coords["freq"] = self.Eth.coords["freq"].round()
+        self.Eph.coords["freq"] = self.Eph.coords["freq"].round()
+        self.rad_eff.coords["freq"] = self.rad_eff.coords["freq"].round()
+
     # return a pattern from Eth and Eph dataarray
     @classmethod
     def from_dataarrays(cls, Eth, Eph, rad_eff=None) -> Self:
@@ -43,7 +50,7 @@ class Pattern:
     def radiant_intensity(self) -> xr.DataArray:
         # compute total radiated power intensity
         Esq = np.abs(self.Eth**2) + np.abs(self.Eph ** 2)
-        U = Esq / ETA0
+        U = Esq / (2.0 * ETA0)
 
         return U
 
@@ -171,7 +178,7 @@ class AntennaArray:
     def active_gamma(self, a: npt.NDArray[np.complex128]) -> xr.DataArray:
         b = self.sp.s @ a.T
         active_gamma = b / a
-        return xr.DataArray(active_gamma, dims=["freq", "elements"], coords={"freq": self.sp.f, "element_num": np.arange(0, np.size(a), 1)})
+        return xr.DataArray(active_gamma, dims=["freq", "element"], coords={"freq": self.sp.f, "element": np.arange(0, np.size(a), 1)})
 
     # compute the total active reflection coefficient for a given excitation
     def tarc(self, a: npt.NDArray[np.complex128]) -> xr.DataArray:
@@ -179,8 +186,8 @@ class AntennaArray:
         tarc = np.sqrt(np.sum(np.abs(b)**2, axis=1) / np.sum(np.abs(a)**2))
         return xr.DataArray(tarc, dims=["freq"], coords={"freq": self.sp.f})
 
-    # excite the array, returning active pattern and radiation efficiency
-    def excited_pat_rad_eff(self, a: npt.NDArray[np.complex128]) -> tuple[Pattern, xr.DataArray]:
+    # excite the array, returning active pattern (with computed radiation efficiency)
+    def excite(self, a: npt.NDArray[np.complex128]) -> Pattern:
         # power incident on ports
         Pinc = np.sum(np.abs(a)**2)
         # normalize excitations for incident power to be 1 W
@@ -195,11 +202,11 @@ class AntennaArray:
         rad_eff = Prad / Ptransmit
         pat.rad_eff = rad_eff
 
-        return pat, rad_eff
+        return pat
 
     # Return the number of elements
     def N(self) -> int:
-        return len(self.patterns)
+        return len(self.patterns.patterns)
 
     # construct an array from s-params and pattern files (either NSI .txt, FEKO .ffe, or HFSS .ffd)
     # type is a list of "nsi", "feko", or "hfss", or None (type will be inferred from file extension)
@@ -243,6 +250,14 @@ class CircularAntennaArray(AntennaArray):
 
     # Return the unaliased circular mode indices available in this array
     def mode_indices(self) -> list[int]:
-        return np.linspace(0, self.N(), 1) - int(self.N() / 2)
+        return np.linspace(0, self.N()-1, self.N()) - int(self.N() / 2)
 
-    
+    # Return the excitation vector for mode m
+    def mode_m_excitation(self, m: int) -> npt.NDArray[np.complex128]:
+        return np.exp(1j * 2*np.pi * np.linspace(0, self.N()-1, self.N()) * m / self.N())
+
+    # Return the pattern for the array excited in mode m
+    def mode_m(self, m: int) -> Pattern:
+        return self.excite(self.mode_m_excitation(m))
+
+
