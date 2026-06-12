@@ -6,6 +6,7 @@ import xarray as xr
 import skrf as rf
 
 from antlib.read_pats import read_nsi_measurements, read_feko_ffe, read_hfss_ffd, get_nsi_nth_nph_nfreqs, write_feko_ffe
+from antlib.matching import match_l_network
 from antlib.constants import ETA0
 
 # Pattern represents a radiation pattern, sampled on a sphere
@@ -174,6 +175,10 @@ class AntennaArray:
         self.patterns = patterns
         self.sp = sp
     
+    # Return the number of elements
+    def N(self) -> int:
+        return len(self.patterns.patterns)
+    
     # Compute active reflection coefficients for a given excitation
     def active_gamma(self, a: npt.NDArray[np.complex128]) -> xr.DataArray:
         b = self.sp.s @ a.T
@@ -204,9 +209,61 @@ class AntennaArray:
 
         return pat
 
-    # Return the number of elements
-    def N(self) -> int:
-        return len(self.patterns.patterns)
+    # generate a network of resistors which makes each active impedance passive
+    # i.e., add enough loss to any element with negative active resistance
+    def make_lossy_negative_active_r_compensation(self, a: npt.NDArray[np.complex128], f0: float, z0: float=50) -> rf.Network:
+        netwrks = []
+        agamma = self.active_gamma(a).sel(freq=f0, method="nearest")
+        netwrks = []
+        f = rf.Frequency.from_f(self.sp.f)
+        line = rf.media.DefinedGammaZ0(frequency=f, z0=z0)
+
+        for n in range(self.N()):
+            gam = agamma.sel(element=n).item()
+            z = z0 * (1 + gam) / (1 - gam)
+            if np.real(z) >= 0:
+                netwrks.append(line.resistor(R=0))
+            else:
+                netwrks.append(line.resistor(R=-np.real(z)+1))
+        
+        return rf.network.concat_ports(netwrks, port_order="second")
+
+    # generate a matching network for the array's active impedances at frequency f0
+    # the first N port are inputs, the last N are connected to array inputs
+    # return the matching network and compensated excitations to matching network
+    def make_l_network_match_active_gamma(self, a: npt.NDArray[np.complex128], f0: float) -> tuple[rf.Network, npt.NDArray[np.complex128]]:
+        f0_index = np.argmin(np.abs(self.sp.f - f0))
+        # make impedances passive with lossy network
+        net_lossy = self.make_lossy_negative_active_r_compensation(a, f0)
+        net_passived = net_lossy ** self.sp
+        # compute active impedances with loss added
+        az = net_passived.z_active(a)[f0_index,:]
+        agamma = (az - 50) / (az + 50)
+        # create matching networks
+        netwrks = []
+        for n in range(self.N()):
+            gam = agamma[n]
+            gam_match = match_l_network(self.sp.f, f0, gam)
+            netwrks.append(gam_match)
+        
+        match_net = rf.network.concat_ports(netwrks, port_order="second")
+        # add lossy section
+        match_net = match_net ** net_lossy
+        # extract s matrix at design frequency
+        Sarray = self.sp.s[f0_index, :, :]
+        # extract relevant blocks of s matrix
+        Smm = match_net.s[f0_index, 0:self.N(), 0:self.N()]
+        Snn = match_net.s[f0_index, self.N():, self.N():]
+        Snm = match_net.s[f0_index, self.N():, 0:self.N()]
+        Smn = match_net.s[f0_index, 0:self.N(), self.N():]
+
+        I = np.eye(self.N())
+        # compensated excitations for matching network
+        acomp = np.linalg.solve(Snm, (I - Snn @ Sarray) @ a)
+        # reflected waves from matching network
+        bcomp = Smm @ acomp + (Smn @ Sarray @ np.linalg.solve(I - Snn @ Sarray, Snm @ acomp))
+
+        return [match_net , acomp]
 
     # construct an array from s-params and pattern files (either NSI .txt, FEKO .ffe, or HFSS .ffd)
     # type is a list of "nsi", "feko", or "hfss", or None (type will be inferred from file extension)
@@ -245,7 +302,7 @@ class CircularAntennaArray(AntennaArray):
     # Convert an AntennaArray into a CircularAntennaArray
     # The elements should be laid out on a circle in a counterclockwise orientation, with element 0 at phi=0
     @classmethod
-    def from_antenna_array(cls, array: AntennaArray) -> CircularAntennaArray:
+    def from_antenna_array(cls, array: AntennaArray) -> Self:
         return CircularAntennaArray(array.patterns, array.sp)
 
     # Return the unaliased circular mode indices available in this array
