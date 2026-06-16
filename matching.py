@@ -20,6 +20,9 @@ def match_l_network(freq: npt.NDArray[np.float64], f0: float, load_gamma: comple
     el1 = None
     el2 = None
 
+    # These are the canonical l-network solutions,
+    # see for instance David Pozar, "Microwave Engineering", 4th ed, (5.1)-(5.6b)
+
     if rl > z0:
         b = (xl + np.sqrt(rl/z0)*np.sqrt(rl**2 + xl**2 - z0*rl))/(rl**2 + xl**2)
         if use_2nd_sol:

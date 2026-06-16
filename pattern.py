@@ -84,6 +84,29 @@ class Pattern:
     def select_freq(self, freq: float) -> Self:
         return Pattern.from_dataarrays(self.Eth.sel(freq=freq, method="nearest").expand_dims("freq"), self.Eph.sel(freq=freq, method="nearest").expand_dims("freq"), self.rad_eff.sel(freq=freq, method="nearest").expand_dims("freq"))
 
+    # take a theta cut of the given data
+    @classmethod
+    def theta_cut(cls, data: xr.DataArray, th: float) -> xr.DataArray:
+        return data.sel(th=th, method="nearest")
+    
+    # take an fft of the given cut data and return the fourier coefficients and mode indices
+    @classmethod
+    def fft_cut(cls, data: xr.DataArray, coord) -> xr.DataArray:
+        fcomp = np.fft.fftshift(np.fft.fft(data.data, axis=data.get_axis_num(coord)))
+        p = CircularAntennaArray.mode_indices_N(np.size(data.coords[coord]))
+        return xr.DataArray(fcomp, dims=("freq", "p"), coords={"p": p, "freq": data.coords["freq"]})
+    
+    # return the least squares phase center in kx for the given data (probably E-field data)
+    @classmethod
+    def phase_center_kx(cls, data: xr.DataArray) -> xr.DataArray:
+        phase = np.unwrap(xr.ufuncs.angle(data))
+        phase = phase - np.mean(phase)
+        weight = np.cos(data.coords["ph"]).expand_dims("dummy_num_dim").T
+
+        kx, _, _, _ =  np.linalg.lstsq(weight.data, phase.T.data)
+
+        return xr.DataArray(kx[0,:], dims=("freq"), coords={"freq": data.coords["freq"]})
+
     # return an z-oriented Hertzian electric dipole pattern containing 1 W at the specified spacing
     @classmethod
     def hertzian_electric_dipole(cls, freq: npt.NDArray[np.float64]=np.array([1e9, 2e9, 3e9]), th_space: float=2*np.pi/180, ph_space: float=2*np.pi/180) -> Self:
@@ -136,8 +159,8 @@ class PatternArray:
         Eph = xr.zeros_like(self.patterns[0].Eph)
 
         for n in range(len(weights)):
-            Eth += weights[n] * self.patterns[n].Eth
-            Eph += weights[n] * self.patterns[n].Eph
+            Eth += (weights[n] * self.patterns[n].Eth.T).T
+            Eph += (weights[n] * self.patterns[n].Eph.T).T
 
         return Pattern.from_dataarrays(Eth, Eph)
 
@@ -186,9 +209,22 @@ class AntennaArray:
         return xr.DataArray(active_gamma, dims=["freq", "element"], coords={"freq": self.sp.f, "element": np.arange(0, np.size(a), 1)})
 
     # compute the total active reflection coefficient for a given excitation
+    # result is in linear scale, use 20*log10 for dB
     def tarc(self, a: npt.NDArray[np.complex128]) -> xr.DataArray:
         b = self.sp.s @ a.T
         tarc = np.sqrt(np.sum(np.abs(b)**2, axis=1) / np.sum(np.abs(a)**2))
+        return xr.DataArray(tarc, dims=["freq"], coords={"freq": self.sp.f})
+
+    def tarc_freq_dependent(self, a: xr.DataArray) -> xr.DataArray:
+        res = np.zeros(np.size(self.sp.f), dtype=np.complex128)
+
+        # add dummy dimension to a and order properly
+        a = a.expand_dims("dummy")
+        a = a.transpose("freq", "element", "dummy")
+
+        b = (self.sp.s @ a.values).squeeze(-1)
+        tarc = np.sqrt(np.sum(np.abs(b)**2, axis=1) / np.sum(np.abs(a.values.squeeze(-1))**2, axis=1))
+
         return xr.DataArray(tarc, dims=["freq"], coords={"freq": self.sp.f})
 
     # excite the array, returning active pattern (with computed radiation efficiency)
@@ -208,25 +244,51 @@ class AntennaArray:
         pat.rad_eff = rad_eff
 
         return pat
+    
+    # excite the array with a different excitation a at each frequency
+    # a should have dimensions element and freq
+    def excite_freq_dependent(self, a: xr.DataArray) -> Pattern:
+        # power incident on ports
+        Pinc = (np.abs(a)**2).sum(dim="element")
+        # normalize excitations for incident power to be 1 W
+        a = a / np.sqrt(Pinc)
+        # power transmitted into antenna
+        tarc = self.tarc_freq_dependent(a)
+        Ptransmit = (1 - tarc**2)
+        # excite patterns
+        pat = self.patterns.excite(a.transpose("element", "freq"))
+        # total power radiated
+        Prad = pat.power()
+        # radiation efficiency
+        rad_eff = Prad / Ptransmit
+        pat.rad_eff = rad_eff
+
+        return pat
 
     # generate a network of resistors which makes each active impedance passive
     # i.e., add enough loss to any element with negative active resistance
-    def make_lossy_negative_active_r_compensation(self, a: npt.NDArray[np.complex128], f0: float, z0: float=50) -> rf.Network:
+    # returns the network and active impedances with resistors added
+    def make_lossy_negative_active_r_compensation(self, a: npt.NDArray[np.complex128], f0: float, z0: float=50) -> tuple[rf.Network, npt.NDArray[np.complex128]]:
         netwrks = []
         agamma = self.active_gamma(a).sel(freq=f0, method="nearest")
         netwrks = []
         f = rf.Frequency.from_f(self.sp.f)
         line = rf.media.DefinedGammaZ0(frequency=f, z0=z0)
 
+        act_z = np.zeros(self.N(), dtype=np.complex128)
+
         for n in range(self.N()):
             gam = agamma.sel(element=n).item()
             z = z0 * (1 + gam) / (1 - gam)
             if np.real(z) >= 0:
                 netwrks.append(line.resistor(R=0))
+                act_z[n] = z
             else:
-                netwrks.append(line.resistor(R=-np.real(z)+1))
+                Rcomp = -np.real(z)+1
+                netwrks.append(line.resistor(R=Rcomp))
+                act_z[n] = z + Rcomp
         
-        return rf.network.concat_ports(netwrks, port_order="second")
+        return (rf.network.concat_ports(netwrks, port_order="second"), act_z)
 
     # generate a matching network for the array's active impedances at frequency f0
     # the first N port are inputs, the last N are connected to array inputs
@@ -234,11 +296,9 @@ class AntennaArray:
     def make_l_network_match_active_gamma(self, a: npt.NDArray[np.complex128], f0: float) -> tuple[rf.Network, npt.NDArray[np.complex128]]:
         f0_index = np.argmin(np.abs(self.sp.f - f0))
         # make impedances passive with lossy network
-        net_lossy = self.make_lossy_negative_active_r_compensation(a, f0)
-        net_passived = net_lossy ** self.sp
+        net_lossy, act_z = self.make_lossy_negative_active_r_compensation(a, f0)
         # compute active impedances with loss added
-        az = net_passived.z_active(a)[f0_index,:]
-        agamma = (az - 50) / (az + 50)
+        agamma = (act_z - 50) / (act_z + 50)
         # create matching networks
         netwrks = []
         for n in range(self.N()):
@@ -249,6 +309,10 @@ class AntennaArray:
         match_net = rf.network.concat_ports(netwrks, port_order="second")
         # add lossy section
         match_net = match_net ** net_lossy
+
+        # Now we have to compensate the excitations for the effect of the matching network
+        # Equations from S. Yen and D. Filipovic, "Theoretical Considerations for Tuning of HF Arrays of Electrically Small Monopoles", IEEE PAST 2024
+
         # extract s matrix at design frequency
         Sarray = self.sp.s[f0_index, :, :]
         # extract relevant blocks of s matrix
@@ -264,6 +328,57 @@ class AntennaArray:
         bcomp = Smm @ acomp + (Smn @ Sarray @ np.linalg.solve(I - Snn @ Sarray, Snm @ acomp))
 
         return [match_net , acomp]
+    
+    def cascade_match(self, match_net: rf.Network) -> Self:
+        Smm = match_net.s[:, 0:self.N(), 0:self.N()]
+        Snn = match_net.s[:, self.N():, self.N():]
+        Snm = match_net.s[:, self.N():, 0:self.N()]
+        Smn = match_net.s[:, 0:self.N(), self.N():]
+        Sarray = self.sp.s
+
+        I = np.eye(self.N())
+
+        new_pats = []
+        for p in range(self.N()):
+            Vin = np.zeros((self.N(),1), dtype=np.complex128)
+            Vin[p] = 1
+            a = np.linalg.solve((I - Snn @ Sarray), Snm @ Vin)
+            # get a pattern with zero fields
+            pat = self.patterns.excite(np.zeros(self.N()))
+            for n in range(self.N()):
+                pat.Eth += (a[:,n,0] * self.patterns.patterns[n].Eth.T).T
+                pat.Eph += (a[:,n,0] * self.patterns.patterns[n].Eph.T).T
+            
+            new_pats.append(pat)
+
+        return AntennaArray(PatternArray(new_pats), match_net.copy() ** self.sp.copy())
+
+    # return the array with embedded element patterns if the array is terminated with a source network Sg
+    def adjust_element_patterns_for_source(self, Sg: rf.Network) -> Self:
+        assert(np.shape(Sg.s)[1] == self.N())
+        assert(np.shape(Sg.s)[2] == self.N())
+
+        I = np.eye(self.N())
+        # convert element patterns to open circuited thevenin sources
+        sa_to_oc_pat = np.linalg.inv(I - self.sp.s)
+        sg_to_oc_pat = np.linalg.solve(np.swapaxes((I - self.sp.s), -1, -2), np.swapaxes((I - Sg.s @ self.sp.s),  -1, -2))
+
+        to_sg_pat = np.linalg.solve(sg_to_oc_pat, sa_to_oc_pat)
+
+        new_pats = []
+        for p in range(self.N()):
+            # get a pattern with zero fields
+            pat = self.patterns.excite(np.zeros(self.N()))
+            for n in range(self.N()):
+                pat.Eth += (to_sg_pat[:,p,n] * self.patterns.patterns[n].Eth.T).T
+                pat.Eph += (to_sg_pat[:,p,n] * self.patterns.patterns[n].Eph.T).T
+            
+            new_pats.append(pat)
+
+        return AntennaArray(PatternArray(new_pats), self.sp.copy())
+
+
+
 
     # construct an array from s-params and pattern files (either NSI .txt, FEKO .ffe, or HFSS .ffd)
     # type is a list of "nsi", "feko", or "hfss", or None (type will be inferred from file extension)
@@ -305,9 +420,13 @@ class CircularAntennaArray(AntennaArray):
     def from_antenna_array(cls, array: AntennaArray) -> Self:
         return CircularAntennaArray(array.patterns, array.sp)
 
+    @staticmethod
+    def mode_indices_N(N: float) -> list[int]:
+        return np.linspace(0, N-1, N) - int(N / 2)
+
     # Return the unaliased circular mode indices available in this array
     def mode_indices(self) -> list[int]:
-        return np.linspace(0, self.N()-1, self.N()) - int(self.N() / 2)
+        return CircularAntennaArray.mode_indices_N(N=self.N())
 
     # Return the excitation vector for mode m
     def mode_m_excitation(self, m: int) -> npt.NDArray[np.complex128]:
@@ -316,5 +435,21 @@ class CircularAntennaArray(AntennaArray):
     # Return the pattern for the array excited in mode m
     def mode_m(self, m: int) -> Pattern:
         return self.excite(self.mode_m_excitation(m))
+
+    # return the excitation for exciting the modal spectrum modes,
+    # with compensation for the array pattern given by fourier coefficients Dp (expanded about origin of array)
+    def modal_excitation_pat_compensated(self, modes: npt.NDArray[np.complex128], Dp: xr.DataArray) -> npt.NDArray[np.complex128]:
+        m = self.mode_indices()
+        m = xr.DataArray(m, dims=("p"), coords={"p": m})
+        # label modes to sum over pattern fourier coefficients
+        modes = xr.DataArray(modes, dims=("p"), coords={"p": m})
+        mode_excite = modes / Dp.sel(p=m) 
+
+        n = xr.DataArray(np.linspace(0, self.N()-1, self.N()), dims=("element"), coords={"element": np.linspace(0, self.N()-1, self.N())})
+
+        excite = (mode_excite * np.exp(1j*2*np.pi * n * m / self.N())).sum(dim="p")
+
+        return excite
+        
 
 
