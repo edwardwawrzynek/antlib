@@ -1,3 +1,4 @@
+from __future__ import annotations
 from typing import Self
 
 import numpy as np
@@ -14,7 +15,7 @@ class Pattern:
     # Construct a radiation pattern from sampled points gridded in theta-phi
     # Eth and Eph are ndarray's of peak (NOT rms) complex electric field intensity values (in V), indexed as [freq, theta, phi]
     # freq is a list of the frequencies of measurement in Hz
-    # theta and phi are the angles in radians of measured points
+    # theta and phi are the angles in radians of measured points, which should be [0,pi] and [0,2*pi]
     # rad_eff is radiation efficiency, used for calculating gain
     def __init__(self, Eth: npt.NDArray[np.complex128], Eph:  npt.NDArray[np.complex128], freq: npt.NDArray[np.float64], theta: npt.NDArray[np.float64], phi: npt.NDArray[np.float64], rad_eff: npt.NDArray[np.float64] = None):
         # remove duplicate points at beginning / end of data
@@ -72,29 +73,50 @@ class Pattern:
     
     # return the pattern rotated in phi by the specified amount (in radians)
     # the rotation will be rounded to the nearest sampling point
-    def rotate_phi(self, delta_phi: float) -> Self:
-        iphi = round(delta_phi / (self.Eth.coords["ph"][1] - self.Eth.coords["ph"][0]))
+    def rotate_phi(self, delta_phi: float) -> Pattern:
+        iphi = round(delta_phi / (self.Eth.coords["ph"][1].values - self.Eth.coords["ph"][0].values))
         Ethr = self.Eth.roll(ph=iphi, roll_coords=False)
         Ephr = self.Eph.roll(ph=iphi, roll_coords=False)
 
-        return Self.from_dataarrays(Ethr, Ephr, self.rad_eff.data)
+        return Pattern.from_dataarrays(Ethr, Ephr, self.rad_eff.data)
 
     # return a pattern with just a single frequency point
     # returns the closest data to the specified frequency
     def select_freq(self, freq: float) -> Self:
         return Pattern.from_dataarrays(self.Eth.sel(freq=freq, method="nearest").expand_dims("freq"), self.Eph.sel(freq=freq, method="nearest").expand_dims("freq"), self.rad_eff.sel(freq=freq, method="nearest").expand_dims("freq"))
 
+    # normalize pattern intensity and compute radiation efficiency based on gain cal
+    def normalize_gain_cal(self, std: GainStandardPattern):
+        fac = std.power_normalize_factor()
+        self.Eth *= fac
+        self.Eph *= fac
+
     # take a theta cut of the given data
     @classmethod
     def theta_cut(cls, data: xr.DataArray, th: float) -> xr.DataArray:
         return data.sel(th=th, method="nearest")
     
+    # take a phi cut of the given data
+    @classmethod
+    def phi_cut(cls, data: xr.DataArray, ph: float) -> xr.DataArray:
+        # normalize ph to data range
+        ph = ph % (2*np.pi)
+        # select both ph and opposite ph cuts
+        cut1 = data.sel(ph=ph, method="nearest")
+        cut2 = data.sel(ph=(ph+np.pi)%(2*np.pi), method="nearest")
+        # reverse and relabel cut2 coordinates
+        cut2 = cut2.isel(th=slice(None, None, -1))
+        cut2.coords["th"] = 2*np.pi - cut2.coords["th"]
+        cut2.coords["ph"] = cut1.coords["ph"]
+        return xr.concat([cut1, cut2], dim="th", coords="different", compat="equals")
+
     # take an fft of the given cut data and return the fourier coefficients and mode indices
     @classmethod
     def fft_cut(cls, data: xr.DataArray, coord) -> xr.DataArray:
-        fcomp = np.fft.fftshift(np.fft.fft(data.data, axis=data.get_axis_num(coord)))
+        coord_axis = data.get_axis_num(coord)
+        fcomp = np.fft.fftshift(np.fft.fft(data.data, axis=coord_axis), axes=coord_axis)
         p = CircularAntennaArray.mode_indices_N(np.size(data.coords[coord]))
-        return xr.DataArray(fcomp, dims=("freq", "p"), coords={"p": p, "freq": data.coords["freq"]})
+        return xr.DataArray(fcomp, dims=("freq", "p"), coords={"freq": data.coords["freq"], "p": p})
     
     # return the least squares phase center in kx for the given data (probably E-field data)
     @classmethod
@@ -147,6 +169,32 @@ class Pattern:
         # read data
         freqs, th, ph, Eth, Eph = read_hfss_ffd(path)
         return Pattern(Eth, Eph, freqs, np.unique(th), np.unique(ph), rad_eff=None)
+
+# A pattern measurement of a gain standard antenna
+# ie, a pattern and a gain table
+class GainStandardPattern(Pattern):
+    def __init__(self, Eth: npt.NDArray[np.complex128], Eph:  npt.NDArray[np.complex128], freq: npt.NDArray[np.float64], theta: npt.NDArray[np.float64], phi: npt.NDArray[np.float64], realized_gain_f: npt.NDArray[np.float64], realized_gain: npt.NDArray[np.float64]):
+        super().__init__(Eth, Eph, freq, theta, phi, rad_eff=None)
+        # interpolate gain standard onto frequency range
+        # TODO: consider if this is the best way to do the interpolation
+        gain_int = np.interp(freq, realized_gain_f, realized_gain)
+        self.gain_standard = xr.DataArray(gain_int, dims="freq", coords={"freq": freq})
+    
+    # compute the field normalization factor (as a function of frequency) for 1 W incident
+    def power_normalize_factor(self):
+        pwr_norm = self.directivity().max(dim=("th", "ph")) * self.power() / self.gain_standard
+        return np.sqrt(1/pwr_norm)
+        
+    @classmethod
+    def from_pattern_with_standard_txt(cls, pat: Pattern, standard_txt_path: str, freq_unit=1e9, gain_dBi=True) -> Self:
+        data = np.loadtxt(standard_txt_path)
+        rgfreq = data[:,0] * freq_unit
+        rg_gain = data[:,1]
+        if gain_dBi:
+            rg_gain = 10.0**(rg_gain/10.0)
+        
+        return GainStandardPattern(pat.Eth.values, pat.Eph.values, pat.Eth.coords["freq"], pat.Eth.coords["th"], pat.Eth.coords["ph"], rgfreq, rg_gain)
+
 
 # A collection of patterns sampled at the same points, which can be excited togeather
 # This would typically be used to represent a collection of embedded element patterns of an array
@@ -405,6 +453,8 @@ class AntennaArray:
                 patterns.append(Pattern.from_FEKO_FFE(pattern_path[n]))
             elif types[n] == "hfss":
                 patterns.append(Pattern.from_HFSS_FFD(pattern_path[n]))
+            else:
+                assert False, f"Cannot recognize extensions of {pattern_path[n]}"
         
         return AntennaArray(PatternArray(patterns), rf.Network(sp_path))
 
