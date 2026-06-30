@@ -425,9 +425,6 @@ class AntennaArray:
 
         return AntennaArray(PatternArray(new_pats), self.sp.copy())
 
-
-
-
     # construct an array from s-params and pattern files (either NSI .txt, FEKO .ffe, or HFSS .ffd)
     # type is a list of "nsi", "feko", or "hfss", or None (type will be inferred from file extension)
     @classmethod
@@ -470,6 +467,8 @@ class CircularAntennaArray(AntennaArray):
     def from_antenna_array(cls, array: AntennaArray) -> Self:
         return CircularAntennaArray(array.patterns, array.sp)
 
+    # return the fundamental unaliased circular mode indices for an N element array
+    # (ie, these are the fundamental fourier modes of an N-sampled signal)
     @staticmethod
     def mode_indices_N(N: float) -> list[int]:
         return np.linspace(0, N-1, N) - int(N / 2)
@@ -487,15 +486,18 @@ class CircularAntennaArray(AntennaArray):
         return self.excite(self.mode_m_excitation(m))
 
     # return the excitation for exciting the modal spectrum modes,
-    # with compensation for the array pattern given by fourier coefficients Dp (expanded about origin of array)
+    # with compensation for the array pattern given by fourier coefficients Dp 
+    # (expanded about origin of array, with dims "element" and "freq")
     def modal_excitation_pat_compensated(self, modes: npt.NDArray[np.complex128], Dp: xr.DataArray) -> npt.NDArray[np.complex128]:
         m = self.mode_indices()
         m = xr.DataArray(m, dims=("p"), coords={"p": m})
         # label modes to sum over pattern fourier coefficients
         modes = xr.DataArray(modes, dims=("p"), coords={"p": m})
         mode_excite = modes / Dp.sel(p=m) 
-
-        n = xr.DataArray(np.linspace(0, self.N()-1, self.N()), dims=("element"), coords={"element": np.linspace(0, self.N()-1, self.N())})
+        # construct element indices with dims to sum properly over circular modes
+        n = xr.DataArray(np.linspace(0, self.N()-1, self.N()), 
+                         dims=("element"), 
+                         coords={"element": np.linspace(0, self.N()-1, self.N())})
 
         excite = (mode_excite * np.exp(1j*2*np.pi * n * m / self.N())).sum(dim="p")
 

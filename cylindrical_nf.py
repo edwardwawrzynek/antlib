@@ -5,22 +5,32 @@ import scipy as sp
 import matplotlib.pyplot as plt
 import xarray as xr
 from antlib.constants import C0
+from antlib.pattern import Pattern, CircularAntennaArray
 
 # Convert cylindrical near field measurements to far fields
-# Eth and Eph are near field values, with dims "freq", "ph" and "z"
+# Ez and Eph are near field values, with dims "freq", "ph" and "z"
 # n is order of azimuthal mode to expand in
 # ff_th and ff_ph are desired sampling points in far field
-def cylindrical_nf_to_ff(r0: float, Eth: xr.DataArray, Eph: xr.DataArray, ff_th: npt.NDArray[np.float64], ff_ph: npt.NDArray[np.float64], N: int = 20) -> tuple[xr.DataArray, xr.DataArray]:
-    freq = Eth.coords["freq"].values
+def cylindrical_nf_to_ff(r0: float, Ez: xr.DataArray, Eph: xr.DataArray, ff_th: npt.NDArray[np.float64], ff_ph: npt.NDArray[np.float64]) -> Pattern:
+    freq = Ez.coords["freq"].values
     k0 = 2*np.pi*freq / C0
     # order of azimuthal mode
-    n = np.arange(-N, N+1, 1)
+    Nsize = np.size(Ez.coords["ph"])
+    n = CircularAntennaArray.mode_indices_N(Nsize)
     # elevations modes
     h = np.multiply.outer(k0, np.cos(ff_th))
     # produce grid of modes to evaluate
-    # NN and HH are index [freq, h, n]
+    # NN and HH are indexed [freq, h, n]
     NN = np.apply_along_axis(lambda hi: np.meshgrid(n, hi)[0], axis=1, arr=h)
     HH = np.apply_along_axis(lambda hi: np.meshgrid(n, hi)[1], axis=1, arr=h)
+
+    # compute Iphi and Iz using fft
+    Iphi = (2*np.pi) / Nsize * np.fft.fftshift(
+        np.fft.fft2(Eph.values, axes=(Eph.get_axis_num("ph"), Eph.get_axis_num("z"))),
+        axes=Eph.get_axis_num("ph"))
+    Iz = (2*np.pi) / Nsize * np.fft.fftshift(
+        np.fft.fft2(Ez.values, axes=(Ez.get_axis_num("ph"), Ez.get_axis_num("z"))),
+        axes=Ez.get_axis_num("ph"))
 
     print(HH[0,:,0])
 
