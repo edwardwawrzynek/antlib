@@ -27,15 +27,9 @@ def cylindrical_nf_to_ff(r0: float, Ez: xr.DataArray, Eph: xr.DataArray, ff_th: 
 
     NNxr = xr.DataArray(NN, dims=("freq", "th", "n"), coords={"freq": Ez.coords["freq"].values, "th": ff_th, "n": n})
     HHxr = xr.DataArray(HH, dims=("freq", "th", "n"), coords={"freq": Ez.coords["freq"].values, "th": ff_th, "n": n})
-
     # compute Iphi and Iz
-    Iphi = 1/(4*np.pi**2) * (Eph * 
-                             np.exp(-1j*NNxr*Eph.coords["ph"]) * 
-                             np.exp(-1j*HHxr*Eph.coords["z"])).integrate(coord="ph").integrate(coord="z")
-    Iz = 1/(4*np.pi**2) * (Ez * 
-                           np.exp(-1j*NNxr*Ez.coords["ph"]) * 
-                           np.exp(-1j*HHxr*Ez.coords["z"])).integrate(coord="ph").integrate(coord="z")
-
+    Iphi = 1/(4*np.pi**2) * ((Eph * np.exp(-1j*NNxr*Eph.coords["ph"])).integrate(coord="ph") * np.exp(1j*HHxr*Eph.coords["z"])).integrate(coord="z")
+    Iz = 1/(4*np.pi**2) * ((Ez * np.exp(-1j*NNxr*Ez.coords["ph"])).integrate(coord="ph") * np.exp(1j*HHxr*Ez.coords["z"])).integrate(coord="z")
     # compute modal coefficients
     Lam = np.sqrt(k0xr**2 - HHxr**2)
     dHdr = Lam * 0.5 * (hankel2(NNxr-1, Lam*r0) - hankel2(NNxr+1, Lam*r0))
@@ -48,10 +42,14 @@ def cylindrical_nf_to_ff(r0: float, Ez: xr.DataArray, Eph: xr.DataArray, ff_th: 
 
     thxr = xr.DataArray(thg, dims=("th", "ph"), coords={"th": ff_th, "ph": ff_ph})
     phxr = xr.DataArray(phg, dims=("th", "ph"), coords={"th": ff_th, "ph": ff_ph})
-
+    print("Calc ff")
     # compute far fields through fft
-    Eth_ff = -1j*2*np.sin(thxr) / r0 * np.exp(-1j*k0xr*r0) * ((1j**NNxr)*bn*np.exp(1j*NNxr*phxr)).sum(dim="n")
-    Eph_ff = -2*np.sin(thxr) / r0 * np.exp(-1j*k0xr*r0) * ((1j**NNxr)*an*np.exp(1j*NNxr*phxr)).sum(dim="n")
+    Eth_ff = -1j*2*np.sin(thxr) / r0 * np.exp(-1j*k0xr*r0) * (((1j)**NNxr)*bn*np.exp(1j*NNxr*phxr)).sum(dim="n")
+    Eph_ff = -2*np.sin(thxr) / r0 * np.exp(-1j*k0xr*r0) * (((1j)**NNxr)*an*np.exp(1j*NNxr*phxr)).sum(dim="n")
+
+    # reorder pattern indexing
+    Eth_ff = Eth_ff.transpose("freq", "th", "ph")
+    Eph_ff = Eph_ff.transpose("freq", "th", "ph")
 
     return Pattern.from_dataarrays(Eth_ff, Eph_ff)
 
