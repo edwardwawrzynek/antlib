@@ -212,3 +212,70 @@ def read_nsi_measurements(path, nth, nph, nfreqs):
     f.close()
 
     return freqs, th, ph, Eth, Eph
+
+def read_cst_ffs(path):
+    f = open(path, "r")
+    freqs = None
+    rad_pwr = None
+    acc_pwr = None
+    stim_pwr = None
+
+    # read header information
+    ln = f.readline()
+    assert(ln.startswith("// CST Farfield Source File"))
+    while True:
+        ln = f.readline()
+        if ln.startswith("// #Frequencies"):
+            ln = f.readline()
+            freqs = np.zeros(int(ln))
+            rad_pwr = np.zeros(int(ln))
+            acc_pwr = np.zeros(int(ln))
+            stim_pwr = np.zeros(int(ln))
+        if ln.startswith("// Radiated/Accepted/Stimulated Power , Frequency "):
+            break
+    
+    # read frequencies
+    for n in range(len(freqs)):
+        rad_pwr[n] = np.float64(f.readline())
+        acc_pwr[n] = np.float64(f.readline())
+        stim_pwr[n] = np.float64(f.readline())
+        freqs[n] = np.float64(f.readline())
+        assert(not f.readline().strip())
+
+    Eth = None
+    Eph = None
+    th = None
+    ph = None
+    nph = None
+    nth = None
+
+    # read field data
+    for n in range(len(freqs)):
+        # compute field scale factor for 1 W stimulated
+        field_scale = np.sqrt(1/stim_pwr[n])
+
+        # get number of points
+        while not f.readline().startswith("// >> Total #phi samples, total #theta samples"):
+            pass
+        comps = f.readline().split(" ")
+        nph = int(comps[0])
+        nth = int(comps[1])
+
+        if Eth is None:
+            Eth = np.zeros((len(freqs), nth, nph), dtype=np.complex128) 
+            Eph = np.zeros((len(freqs), nth, nph), dtype=np.complex128)
+            th = np.zeros((nth, nph))
+            ph = np.zeros((nth, nph))
+        # align to data
+        while not f.readline().startswith("// >> Phi, Theta, Re(E_Theta), Im(E_Theta), Re(E_Phi), Im(E_Phi):"):
+            pass
+
+        for pi in range(nph):
+            for ti in range(nth):
+                comps = f.readline().strip().split()
+                th[ti, pi] = np.float64(comps[1])*np.pi/180.0
+                ph[ti, pi] = np.float64(comps[0])*np.pi/180.0
+                Eth[n, ti, pi] = (np.float64(comps[2]) + 1j*np.float64(comps[3])) * field_scale
+                Eph[n, ti, pi] = (np.float64(comps[4]) + 1j*np.float64(comps[5])) * field_scale
+
+    return freqs, th, ph, Eth, Eph

@@ -6,7 +6,7 @@ import numpy.typing as npt
 import xarray as xr
 import skrf as rf
 
-from antlib.read_pats import read_nsi_measurements, read_feko_ffe, read_hfss_ffd, get_nsi_nth_nph_nfreqs, write_feko_ffe
+from antlib.read_pats import read_nsi_measurements, read_feko_ffe, read_hfss_ffd, read_cst_ffs, get_nsi_nth_nph_nfreqs, write_feko_ffe
 from antlib.matching import match_l_network
 from antlib.constants import ETA0
 
@@ -168,6 +168,12 @@ class Pattern:
     def from_HFSS_FFD(cls, path: str) -> Self:
         # read data
         freqs, th, ph, Eth, Eph = read_hfss_ffd(path)
+        return Pattern(Eth, Eph, freqs, np.unique(th), np.unique(ph), rad_eff=None)
+    
+    # Return the pattern contained in a FFS file from CST Studio Suite
+    @classmethod
+    def from_CST_FFS(cls, path: str) -> Self:
+        freqs, th, ph, Eth, Eph = read_cst_ffs(path)
         return Pattern(Eth, Eph, freqs, np.unique(th), np.unique(ph), rad_eff=None)
 
 # A pattern measurement of a gain standard antenna
@@ -425,8 +431,8 @@ class AntennaArray:
 
         return AntennaArray(PatternArray(new_pats), self.sp.copy())
 
-    # construct an array from s-params and pattern files (either NSI .txt, FEKO .ffe, or HFSS .ffd)
-    # type is a list of "nsi", "feko", or "hfss", or None (type will be inferred from file extension)
+    # construct an array from s-params and pattern files (either NSI .txt, FEKO .ffe, HFSS .ffd, or CST .ffs)
+    # type is a list of "nsi", "feko", or "hfss", "cst", or None (type will be inferred from file extension)
     @classmethod
     def from_touchstone_pattern_files(cls, sp_path: str, pattern_path: list[str], types: list[str] = None) -> Self:
         # infer pattern file types
@@ -439,6 +445,8 @@ class AntennaArray:
                     types[n] = "feko"
                 elif pattern_path[n].endswith(".ffd"):
                     types[n] = "hfss"
+                elif pattern_path[n].endswith(".ffs"):
+                    types[n] = "cst"
 
         assert(len(pattern_path) == len(types))
         patterns = []
@@ -450,6 +458,8 @@ class AntennaArray:
                 patterns.append(Pattern.from_FEKO_FFE(pattern_path[n]))
             elif types[n] == "hfss":
                 patterns.append(Pattern.from_HFSS_FFD(pattern_path[n]))
+            elif types[n] == "cst":
+                patterns.append(Pattern.from_CST_FFS(pattern_path[n]))
             else:
                 assert False, f"Cannot recognize extensions of {pattern_path[n]}"
         

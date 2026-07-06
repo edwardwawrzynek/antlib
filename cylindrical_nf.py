@@ -24,12 +24,22 @@ def cylindrical_nf_to_ff(r0: float, Ez: xr.DataArray, Eph: xr.DataArray, ff_th: 
     # NN and HH are indexed [freq, h, n]
     NN = np.apply_along_axis(lambda hi: np.meshgrid(n, hi)[0], axis=1, arr=h)
     HH = np.apply_along_axis(lambda hi: np.meshgrid(n, hi)[1], axis=1, arr=h)
-
     NNxr = xr.DataArray(NN, dims=("freq", "th", "n"), coords={"freq": Ez.coords["freq"].values, "th": ff_th, "n": n})
     HHxr = xr.DataArray(HH, dims=("freq", "th", "n"), coords={"freq": Ez.coords["freq"].values, "th": ff_th, "n": n})
+    # compute n (ph azimuthal) parts of Iphi and Iz through fft
+    Iphi1 = 2*np.pi / Eph.sizes["ph"] * sp.fft.fftshift(
+        sp.fft.fft(Eph, axis=Eph.get_axis_num("ph"), n=2*N+1), 
+        axes=Eph.get_axis_num("ph"))
+    
+    Iz1 = 2*np.pi / Ez.sizes["ph"] * sp.fft.fftshift(
+        sp.fft.fft(Ez, axis=Eph.get_axis_num("ph"), n=2*N+1), 
+        axes=Ez.get_axis_num("ph"))
+    # re-index fft results in terms of spectral n
+    Iphi1 = xr.DataArray(Iphi1, dims=("freq", "n", "z"), coords={"freq": Eph.coords["freq"].values, "n": n, "z": Eph.coords["z"].values})
+    Iz1 = xr.DataArray(Iz1, dims=("freq", "n", "z"), coords={"freq": Ez.coords["freq"].values, "n": n, "z": Ez.coords["z"].values})
     # compute Iphi and Iz
-    Iphi = 1/(4*np.pi**2) * ((Eph * np.exp(-1j*NNxr*Eph.coords["ph"])).integrate(coord="ph") * np.exp(1j*HHxr*Eph.coords["z"])).integrate(coord="z")
-    Iz = 1/(4*np.pi**2) * ((Ez * np.exp(-1j*NNxr*Ez.coords["ph"])).integrate(coord="ph") * np.exp(1j*HHxr*Ez.coords["z"])).integrate(coord="z")
+    Iphi = 1/(4*np.pi**2) * (Iphi1 * np.exp(1j*HHxr*Eph.coords["z"])).integrate(coord="z")
+    Iz = 1/(4*np.pi**2) * (Iz1 * np.exp(1j*HHxr*Ez.coords["z"])).integrate(coord="z")
     # compute modal coefficients
     Lam = np.sqrt(k0xr**2 - HHxr**2)
     dHdr = Lam * 0.5 * (hankel2(NNxr-1, Lam*r0) - hankel2(NNxr+1, Lam*r0))
