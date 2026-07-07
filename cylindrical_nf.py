@@ -12,7 +12,10 @@ from antlib.pattern import Pattern
 # Ez and Eph are near field values, with dims "freq", "ph" and "z"
 # n is order of azimuthal mode to expand in
 # ff_th and ff_ph are desired sampling points in far field
-def cylindrical_nf_to_ff(r0: float, Ez: xr.DataArray, Eph: xr.DataArray, ff_th: npt.NDArray[np.float64], ff_ph: npt.NDArray[np.float64], N: int = 20) -> Pattern:
+def cylindrical_nf_to_ff(r0: float, Ez: xr.DataArray, Eph: xr.DataArray, ff_th: npt.NDArray[np.float64], ff_ph: npt.NDArray[np.float64], N: int = None) -> Pattern:
+    if N is None:
+        N = int(Ez.sizes["ph"]/2)
+    
     freq = Ez.coords["freq"].values
     k0 = 2*np.pi*freq / C0
     k0xr = 2*np.pi*Ez.coords["freq"] / C0

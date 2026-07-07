@@ -437,16 +437,20 @@ class AntennaArray:
     def from_touchstone_pattern_files(cls, sp_path: str, pattern_path: list[str], types: list[str] = None) -> Self:
         # infer pattern file types
         if types is None:
-            types = [""] * len(pattern_path)
-            for n in range(len(pattern_path)):
-                if pattern_path[n].endswith(".txt"):
-                    types[n] = "nsi"
-                elif pattern_path[n].endswith(".ffe"):
-                    types[n] = "feko"
-                elif pattern_path[n].endswith(".ffd"):
-                    types[n] = "hfss"
-                elif pattern_path[n].endswith(".ffs"):
-                    types[n] = "cst"
+            types = [None] * len(pattern_path)
+
+        for n in range(len(pattern_path)):
+            if not types[n] is None:
+                continue
+            # recognize type
+            if pattern_path[n].endswith(".txt"):
+                types[n] = "nsi"
+            elif pattern_path[n].endswith(".ffe"):
+                types[n] = "feko"
+            elif pattern_path[n].endswith(".ffd"):
+                types[n] = "hfss"
+            elif pattern_path[n].endswith(".ffs"):
+                types[n] = "cst"
 
         assert(len(pattern_path) == len(types))
         patterns = []
